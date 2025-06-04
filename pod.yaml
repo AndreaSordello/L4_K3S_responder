@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: l4-responder
+  labels:
+    app: l4-responder
+spec:
+  nodeName: poli-master-00
+  containers:
+  - name: responder
+    image: alpine/socat
+    command: ["socat"]
+    args: ["-v", "TCP-LISTEN:10000,reuseaddr,fork", "SYSTEM:cat"]
+    ports:
+    - containerPort: 10000
+      hostPort: 10000

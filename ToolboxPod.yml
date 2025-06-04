@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: toolbox-daemonset
+  labels:
+    app: toolbox
+spec:
+  selector:
+    matchLabels:
+      app: toolbox
+  template:
+    metadata:
+      labels:
+        app: toolbox
+    spec:
+      hostNetwork: true
+      containers:
+      - name: toolbox
+        image: andreasordello/toolbox:latest
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          privileged: true
+        env:
+        - name: KUBECONFIG
+          value: /app/kubeconfig/kubeconfig
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        volumeMounts:
+        - name: kubeconfig-volume
+          mountPath: /app/kubeconfig
+          readOnly: true
+      volumes:
+      - name: kubeconfig-volume
+        secret:
+          secretName: kubeconfig-secret
+          items:
+          - key: kubeconfig
+            path: kubeconfig
