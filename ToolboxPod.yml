@@ -17,19 +17,23 @@ spec:
       containers:
       - name: toolbox
         image: andreasordello/toolbox:latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         securityContext:
           privileged: true
         env:
         - name: KUBECONFIG
-          value: /app/kubeconfig/kubeconfig
+          valueFrom:
+            secretKeyRef:
+              name: kubeconfig-secret
+              key: kubeconfig
         - name: NODE_NAME
           valueFrom:
             fieldRef:
               fieldPath: spec.nodeName
         volumeMounts:
         - name: kubeconfig-volume
-          mountPath: /app/kubeconfig
+          mountPath: /app/kubeconfig/
+          subPath: kubeconfig.yml  # This is key!
           readOnly: true
       volumes:
       - name: kubeconfig-volume

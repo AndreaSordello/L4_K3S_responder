@@ -4,7 +4,7 @@ from time import sleep
 import os
 from itertools import cycle
 import logging
-
+import tempfile
 # Set up colored logging output
 class ColorFormatter(logging.Formatter):
     COLORS = {
@@ -116,6 +116,11 @@ def remove_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
 node_name = os.getenv("NODE_NAME")
 KUBECONFIG = os.getenv("KUBECONFIG")
 
+
+
+logging.info(f"Node name: {node_name}")
+logging.info(f"Kubeconfig: {KUBECONFIG}")
+
 if KUBECONFIG == None and node_name == None:
     node_name ="poli-master-00" 
     KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
@@ -126,9 +131,14 @@ else:
 
 cleanup()
 init_table() 
+kubeconfig_text = os.getenv("KUBECONFIG")
+with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpfile:
+    tmpfile.write(kubeconfig_text)
+    tmpfile.flush()
+    tmp_kubeconfig_path = tmpfile.name
 
-
-config.load_kube_config(config_file=KUBECONFIG)
+# Now load config from the temp file
+config.load_kube_config(config_file=tmp_kubeconfig_path)
 v1 = client.CoreV1Api()
 w = watch.Watch()
 

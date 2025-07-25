@@ -7,8 +7,8 @@ TAG="latest"
 
 # ───── BUILD IMAGES ─────
 echo "📦 Building Docker images..."
-docker build -t $IMAGE1_NAME:$TAG ./Dockerfile-toolbox
-docker build -t $IMAGE2_NAME:$TAG ./Dockerfile-responder
+docker build -t $IMAGE1_NAME:$TAG -f ./Dockerfile_toolbox .
+docker build -t $IMAGE2_NAME:$TAG -f ./Dockerfile_responder .
 
 # ───── PUSH IMAGES ─────
 echo "🚀 Pushing images to remote repository..."

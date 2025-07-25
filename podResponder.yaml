@@ -5,7 +5,7 @@ metadata:
   labels:
     app: l4-responder
 spec:
-  nodeName: poli-master-00
+  nodeName: master-00
   containers:
   - name: responder
     image: alpine/socat

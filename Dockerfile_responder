@@ -14,9 +14,9 @@ WORKDIR /app
 # Copy files
 
 COPY responder.py .
-
+RUN  pip install --upgrade pip
 # Install Python dependencies
-RUN pip install --no-cache-dir -r netifaces
+RUN pip install netifaces
 
 # Entry point
 CMD ["python", "responder.py"]
