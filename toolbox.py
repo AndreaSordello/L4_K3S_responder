@@ -5,6 +5,8 @@ import os
 from itertools import cycle
 import logging
 import tempfile
+import subprocess
+
 # Set up colored logging output
 class ColorFormatter(logging.Formatter):
     COLORS = {
@@ -21,119 +23,114 @@ class ColorFormatter(logging.Formatter):
         message = super().format(record)
         return f"{color}{message}{self.RESET}"
 
+
+
+
 handler = logging.StreamHandler()
 formatter = ColorFormatter('[%(levelname)s] %(asctime)s - %(message)s', "%Y-%m-%d %H:%M:%S")
 handler.setFormatter(formatter)
 logging.basicConfig(level=logging.DEBUG, handlers=[handler])
 
+
+def run_iptables(cmd: str):
+    full_cmd = f"iptables {cmd}"
+    result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
+    if result.returncode != 0:
+        logging.error(f"iptables command failed: {full_cmd}\n{result.stderr}")
+    else:
+        logging.debug(f"Ran: {full_cmd}")
+
+
 def cleanup():
-    nat_table = iptc.Table(iptc.Table.NAT)
-    nat_table.autocommit = True
-    chain_names = [chain.name for chain in nat_table.chains]
-
-    if "CYBORG" in chain_names:
-        logging.info("Cleaning up CYBORG related rules...")
-        # Remove the CYBORG chain and any associated rules
-        nat_table = iptc.Table(iptc.Table.NAT)
-        nat_table.autocommit = True
-        nat_table.refresh()
-        prerouting = iptc.Chain(nat_table, "PREROUTING")
-        for rule in prerouting.rules:
-            if rule.target.name == "CYBORG":
-                prerouting.delete_rule(rule)
-                logging.debug("Removed jump from PREROUTING to CYBORG.")
-        cyborg_chain = iptc.Chain(nat_table, "CYBORG")
-        if cyborg_chain:
-            cyborg_chain.flush()
-            nat_table.delete_chain(cyborg_chain)
-            logging.debug("CYBORG chain removed.")
-
-        # Optionally, you can also remove the jump from PREROUTING to CYBORG
+    logging.info("Flushing and deleting CYBORG chain")
+    run_iptables("-t nat -F CYBORG || true")
+    run_iptables("-t nat -D PREROUTING -j CYBORG || true")
+    run_iptables("-t nat -X CYBORG || true")
         
 def init_table():
-    nat_table = iptc.Table(iptc.Table.NAT)
-    nat_table.create_chain("CYBORG")
-    nat_table.autocommit = True
+    logging.info("Initializing iptables NAT table and CYBORG chain...")
+    # Create CYBORG chain if it doesn’t exist
+    run_iptables("-t nat -N CYBORG || true")
+
+    # Insert jump from PREROUTING to CYBORG if not already present
+    check_jump = subprocess.run(
+        "iptables -t nat -C PREROUTING -j CYBORG",
+        shell=True, capture_output=True, text=True
+    )
+
+    if check_jump.returncode != 0:
+        run_iptables("-t nat -A PREROUTING -j CYBORG")
+        logging.info("Added jump from PREROUTING to CYBORG chain.")
+    else:
+        logging.debug("Jump from PREROUTING to CYBORG already exists.")
 
 
-    # Step 5: Re-insert jump from PREROUTING to CYBORG
-    prerouting = iptc.Chain(nat_table, "PREROUTING")
-    rule = iptc.Rule()
-    rule.target = iptc.Target(rule, "CYBORG")
-    prerouting.insert_rule(rule)
 
-    logging.info("[Re-]Created CYBORG chain and linked it to NAT-PREROUTING")
 def add_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
-    nat_table = iptc.Table(iptc.Table.NAT)
-    nat_table.autocommit = True
-    nat_table.refresh()
+    logging.info(f"Adding iptables rule: {from_port} -> {to_ip}:{to_port}")
 
-    # Add DNAT rule in the specified chain (e.g. PREROUTING or your custom chain)
-    chain = iptc.Chain(nat_table, chain_name)
+    # DNAT rule
+    run_iptables(f"-t nat -A {chain_name} -p tcp --dport {from_port} -j DNAT --to-destination {to_ip}:{to_port}")
 
-    rule = iptc.Rule()
-    rule.protocol = "tcp"
+    # Check for MASQUERADE rule in POSTROUTING
+    check_cmd = "iptables -t nat -S POSTROUTING | grep MASQUERADE"
+    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+    if not result.stdout:
+        run_iptables("-t nat -A POSTROUTING -j MASQUERADE")
+        logging.info("Added MASQUERADE rule to POSTROUTING.")
+    else:
+        logging.debug("MASQUERADE rule already exists.")
 
-    match = rule.create_match("tcp")
-    match.dport = from_port
+def remove_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
+    logging.info(f"Removing iptables rule for {from_port} -> {to_ip}:{to_port}")
 
-    target = rule.create_target("DNAT")
-    target.to_destination = f"{to_ip}:{to_port}"
+    # List rules in the chain
+    list_cmd = f"iptables -t nat -S {chain_name}"
+    result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
 
-    chain.append_rule(rule)
+    if result.returncode != 0:
+        logging.error(f"Failed to list iptables rules for chain {chain_name}")
+        return
 
-    # Add MASQUERADE rule in POSTROUTING chain (if not already present)
-    postrouting = iptc.Chain(nat_table, "POSTROUTING")
+    lines = result.stdout.splitlines()
+    removed = False
 
-    # Check if a masquerade rule for this to_ip is already present
-    exists = False
-    for r in postrouting.rules:
-        if r.target.name == "MASQUERADE":
-            # Optionally check matches here (e.g. interface or source IP)
-            exists = True
+    for line in lines:
+        if (f"--dport {from_port}" in line or f"--dport {from_port.split(':')[0]}" in line) and \
+           f"--to-destination {to_ip}:{to_port}" in line:
+            delete_cmd = line.replace("-A", "-t nat -D", 1)
+            run_iptables(delete_cmd)
+            logging.info(f"Removed matching rule: {delete_cmd}")
+            removed = True
             break
 
-    if not exists:
-        masquerade_rule = iptc.Rule()
-        # You can add specific matches here if needed (e.g. outgoing interface)
-        masquerade_rule.target = iptc.Target(masquerade_rule, "MASQUERADE")
-        postrouting.insert_rule(masquerade_rule)
-def remove_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
-    nat_table = iptc.Table(iptc.Table.NAT)
-    nat_table.autocommit = True
-    nat_table.refresh()
-
-    # Remove DNAT rule from specified chain
-    chain = iptc.Chain(nat_table, chain_name)
-    for rule in chain.rules:
-            for match in rule.matches:
-                if match.name == "tcp" and rule.target.name == "DNAT" and rule.target.to_destination == f"{to_ip}:{to_port}":
-                    chain.delete_rule(rule)
-                    break
-
-
+    if not removed:
+        logging.warning("No matching iptables DNAT rule found to delete.")
 
 node_name = os.getenv("NODE_NAME")
 KUBECONFIG = os.getenv("KUBECONFIG")
 
 
 
-logging.info(f"Node name: {node_name}")
-logging.info(f"Kubeconfig: {KUBECONFIG}")
+
 
 if KUBECONFIG == None and node_name == None:
     node_name ="poli-master-00" 
-    KUBECONFIG = "/etc/rancher/k3s/k3s.yaml"
-    logging.info(f"I am running LOCALY on node: {node_name} with kubeconfig: {KUBECONFIG}")
+
+    with open("kubeconfig.yaml", "r") as f:
+        KUBECONFIG = f.read()
+    logging.info(f"I am running LOCALLY on node: {node_name} with kubeconfig: {KUBECONFIG}")
 else:
     logging.info(f"I am running on node: {node_name} with kubeconfig: {KUBECONFIG}")
-    logging.info(f"Running in the cluster,{os.getenv('NODE_NAME')}-{KUBECONFIG}.")
+
+logging.info(f"Node name: {node_name}")
+logging.info(f"Kubeconfig: {KUBECONFIG}")
 
 cleanup()
 init_table() 
-kubeconfig_text = os.getenv("KUBECONFIG")
+
 with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpfile:
-    tmpfile.write(kubeconfig_text)
+    tmpfile.write(KUBECONFIG)
     tmpfile.flush()
     tmp_kubeconfig_path = tmpfile.name
 
@@ -147,13 +144,11 @@ def handle_pod_event(event):
         event_type = event['type']
         node_name = pod.spec.node_name
         pod_name = pod.metadata.name
-
-        if node_name == "poli-master-00":
-            
-            logging.debug(f"[{event_type}] Pod '{pod_name}' scheduled on node {node_name} in namespace '{pod.metadata.namespace}'")
-            #print(pod.metadata)
+        
+        
 
         if pod.metadata.name == "l4-responder" and event_type == "ADDED":
+            logging.debug(f"[{event_type}] Pod '{pod_name}' scheduled on node {node_name} in namespace '{pod.metadata.namespace}'")
 
             while pod.status.pod_ip == None:
                 pod = v1.read_namespaced_pod(name=pod.metadata.name,namespace=pod.metadata.namespace)
@@ -162,11 +157,11 @@ def handle_pod_event(event):
 
             IP_pod_dict[pod.metadata.name] = pod.status.pod_ip
             logging.info(F"---[{pod.metadata.name}] Modifying iptables rules to redirect traffic to  pod IP {pod.status.pod_ip}...")
-            add_forward("CYBORG", "40000:41000", "10000", pod.status.pod_ip)
+            add_forward("CYBORG", "40000:41000", "60000", pod.status.pod_ip)
 
         if pod.metadata.name == "l4-responder" and event_type == "DELETED":
             logging.info(f"---[{pod.metadata.name}]Modifying iptables rules to STOP traffic to pod IP {IP_pod_dict[pod.metadata.name]}...")
-            remove_forward("CYBORG", "40000:41000", "10000", IP_pod_dict[pod.metadata.name])
+            remove_forward("CYBORG", "40000:41000", "60000", IP_pod_dict[pod.metadata.name])
             IP_pod_dict.pop(pod.metadata.name, None)
 
 
@@ -180,7 +175,7 @@ svc_stream = w.stream(v1.list_service_for_all_namespaces, timeout_seconds=0)
 config_stream = w.stream(v1.list_config_map_for_all_namespaces, timeout_seconds=0)
 
 
-streams = [("pod", pod_stream), ("svc", svc_stream),("config", config_stream)]
+streams = [("pod", pod_stream)]  #In the future you can add more streams like ("svc", svc_stream) or ("config", config_stream)
 stream_cycle = cycle(streams)
 
 while True:
@@ -197,7 +192,9 @@ while True:
     
 
     if stream_type == "pod":
+        
         handle_pod_event(event)
+    '''
     elif stream_type == "config":
         config_map = event['object']
         event_type = event['type']
@@ -213,7 +210,6 @@ while True:
         svc_namespace = svc.metadata.namespace
 
         logging.debug(f"[{event_type}] Service '{svc_name}' in namespace '{svc_namespace}'")
-        # You can add logic here to handle service events as needed
-
+    '''
     sleep(1)  # Sleep to avoid overwhelming the output
 
