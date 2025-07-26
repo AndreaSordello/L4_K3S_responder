@@ -62,7 +62,7 @@ if __name__ == "__main__":
     print("\n📡 INTERFACCE DI RETE:")
     for iface_info in get_interface_info():
         print(f" • {iface_info}")
-    print(f"\n🔊 IN ASCOLTO SU: {LISTEN_IP}}")
+    print(f"\n🔊 IN ASCOLTO SU: {LISTEN_IP}")
     print(f"⏰ TIMEOUT CONNESSIONE: {CONNECTION_TIMEOUT} secondi\n")
 
     asyncio.run(start_server())

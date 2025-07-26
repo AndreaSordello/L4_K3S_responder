@@ -8,9 +8,8 @@ spec:
   nodeName: master-00
   containers:
   - name: responder
-    image: alpine/socat
-    command: ["socat"]
-    args: ["-v", "TCP-LISTEN:10000,reuseaddr,fork", "SYSTEM:cat"]
+    image: andreasordello/l4-responder:latest
+    imagePullPolicy: Always
     ports:
-    - containerPort: 10000
-      hostPort: 10000
+    - containerPort: 60000
+      hostPort: 60000
