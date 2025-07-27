@@ -1,5 +1,4 @@
 from kubernetes import client, config,watch
-import iptc
 from time import sleep
 import os
 from itertools import cycle
@@ -120,7 +119,16 @@ if KUBECONFIG == None and node_name == None:
     with open("kubeconfig.yaml", "r") as f:
         KUBECONFIG = f.read()
     logging.info(f"I am running LOCALLY on node: {node_name} with kubeconfig: {KUBECONFIG}")
+    with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpfile:
+        tmpfile.write(KUBECONFIG)
+        tmpfile.flush()
+        tmp_kubeconfig_path = tmpfile.name
+
+        # Now load config from the temp file
+    config.load_kube_config(config_file=tmp_kubeconfig_path)
+
 else:
+    config.load_incluster_config()
     logging.info(f"I am running on node: {node_name} with kubeconfig: {KUBECONFIG}")
 
 logging.info(f"Node name: {node_name}")
@@ -129,13 +137,7 @@ logging.info(f"Kubeconfig: {KUBECONFIG}")
 cleanup()
 init_table() 
 
-with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpfile:
-    tmpfile.write(KUBECONFIG)
-    tmpfile.flush()
-    tmp_kubeconfig_path = tmpfile.name
 
-# Now load config from the temp file
-config.load_kube_config(config_file=tmp_kubeconfig_path)
 v1 = client.CoreV1Api()
 w = watch.Watch()
 
