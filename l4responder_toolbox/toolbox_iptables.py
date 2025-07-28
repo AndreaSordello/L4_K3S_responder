@@ -31,13 +31,6 @@ handler.setFormatter(formatter)
 logging.basicConfig(level=logging.DEBUG, handlers=[handler])
 
 
-def run_nft(cmd: str):
-    full_cmd = f"nft {cmd}"
-    result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error(f"nft command failed: {full_cmd}\n{result.stderr}")
-    else:
-        logging.debug(f"Ran: {full_cmd}")
 
 
 
@@ -49,67 +42,72 @@ def run_iptables(cmd: str):
     else:
         logging.debug(f"Ran: {full_cmd}")
 
+
 def cleanup():
     logging.info("Flushing and deleting CYBORG chain")
-    run_nft("flush chain ip nat CYBORG || true")
-    run_nft("delete chain ip nat CYBORG || true")
-    run_nft("delete rule ip nat PREROUTING handle $(nft list chain ip nat PREROUTING | grep 'jump CYBORG' | awk '{print $1}') || true")
-
+    run_iptables("-t nat -F CYBORG || true")
+    run_iptables("-t nat -D PREROUTING -j CYBORG || true")
+    run_iptables("-t nat -X CYBORG || true")
+        
 def init_table():
-    logging.info("Initializing nftables NAT table and CYBORG chain...")
+    logging.info("Initializing iptables NAT table and CYBORG chain...")
     # Create CYBORG chain if it doesn’t exist
-    run_nft("add chain ip nat CYBORG { type nat hook prerouting priority 0 \; } || true")
+    run_iptables("-t nat -N CYBORG || true")
 
     # Insert jump from PREROUTING to CYBORG if not already present
-    check_cmd = "nft list chain ip nat PREROUTING | grep 'jump CYBORG'"
-    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
+    check_jump = subprocess.run(
+        "iptables -t nat -C PREROUTING -j CYBORG",
+        shell=True, capture_output=True, text=True
+    )
 
-    if result.returncode != 0 or not result.stdout.strip():
-        run_nft("add rule ip nat PREROUTING jump CYBORG")
+    if check_jump.returncode != 0:
+        run_iptables("-t nat -A PREROUTING -j CYBORG")
         logging.info("Added jump from PREROUTING to CYBORG chain.")
     else:
         logging.debug("Jump from PREROUTING to CYBORG already exists.")
 
-def ensure_masquerade():
-    check_cmd = "nft list chain ip nat POSTROUTING | grep masquerade"
+
+
+def add_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
+    logging.info(f"Adding iptables rule: {from_port} -> {to_ip}:{to_port}")
+
+    # DNAT rule
+    run_iptables(f"-t nat -A {chain_name} -p tcp --dport {from_port} -j DNAT --to-destination {to_ip}:{to_port}")
+
+    # Check for MASQUERADE rule in POSTROUTING
+    check_cmd = "iptables -t nat -S POSTROUTING | grep MASQUERADE"
     result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-    if not result.stdout.strip():
-        run_nft("add rule ip nat POSTROUTING masquerade")
+    if not result.stdout:
+        run_iptables("-t nat -A POSTROUTING -j MASQUERADE")
         logging.info("Added MASQUERADE rule to POSTROUTING.")
     else:
         logging.debug("MASQUERADE rule already exists.")
 
-def add_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
-    logging.info(f"Adding nftables rule: {from_port} -> {to_ip}:{to_port}")
-    run_nft(f"add rule ip nat {chain_name} tcp dport {from_port} dnat to {to_ip}:{to_port}")
-    ensure_masquerade()
-
 def remove_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
-    logging.info(f"Removing nftables rule for {from_port} -> {to_ip}:{to_port}")
+    logging.info(f"Removing iptables rule for {from_port} -> {to_ip}:{to_port}")
 
-    # List rules in the chain and find matching rule handles to delete
-    list_cmd = f"nft list chain ip nat {chain_name}"
+    # List rules in the chain
+    list_cmd = f"iptables -t nat -S {chain_name}"
     result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
+
     if result.returncode != 0:
-        logging.error(f"Failed to list nftables rules for chain {chain_name}")
+        logging.error(f"Failed to list iptables rules for chain {chain_name}")
         return
 
-    # Rules have handles you can delete by handle
     lines = result.stdout.splitlines()
-    for line in lines:
-        # Example rule line:
-        #    tcp dport 30000-30100 dnat to 10.42.0.138:60000 # handle 42
-        if f"tcp dport {from_port}" in line and f"dnat to {to_ip}:{to_port}" in line:
-            # Extract handle number
-            import re
-            handle_match = re.search(r"handle (\d+)", line)
-            if handle_match:
-                handle = handle_match.group(1)
-                run_nft(f"delete rule ip nat {chain_name} handle {handle}")
-                logging.info(f"Removed rule with handle {handle}")
-                return
+    removed = False
 
-    logging.warning("No matching nftables DNAT rule found to delete.")
+    for line in lines:
+        if (f"--dport {from_port}" in line or f"--dport {from_port.split(':')[0]}" in line) and \
+           f"--to-destination {to_ip}:{to_port}" in line:
+            delete_cmd = line.replace("-A", "-t nat -D", 1)
+            run_iptables(delete_cmd)
+            logging.info(f"Removed matching rule: {delete_cmd}")
+            removed = True
+            break
+
+    if not removed:
+        logging.warning("No matching iptables DNAT rule found to delete.")
 
 
 
@@ -175,13 +173,13 @@ def handle_pod_event(event):
             logging.info(F"---[{pod.metadata.name}] Modifying iptables rules to redirect traffic to  pod IP {pod.status.pod_ip}...")
 
             for start, end in port_ranges:
-                from_port = f"{start}-{end}"
+                from_port = f"{start}:{end}"
                 add_forward("CYBORG", from_port, CONTAINER_PORT, pod.status.pod_ip)
 
         if pod.metadata.name == "l4-server" and event_type == "DELETED":
             logging.info(f"---[{pod.metadata.name}]Modifying iptables rules to STOP traffic to pod IP {IP_pod_dict[pod.metadata.name]}...")
             for start, end in port_ranges:
-                from_port = f"{start}-{end}"
+                from_port = f"{start}:{end}"
                 remove_forward("CYBORG", from_port, CONTAINER_PORT, IP_pod_dict[pod.metadata.name])
             IP_pod_dict.pop(pod.metadata.name, None)
 
