@@ -6,6 +6,11 @@ import logging
 import tempfile
 import subprocess
 
+from utily import run_nft, run_iptables, cleanup, init_table, ensure_masquerade, add_forward
+
+
+
+
 # Set up colored logging output
 class ColorFormatter(logging.Formatter):
     COLORS = {
@@ -31,91 +36,11 @@ handler.setFormatter(formatter)
 logging.basicConfig(level=logging.DEBUG, handlers=[handler])
 
 
-def run_nft(cmd: str):
-    full_cmd = f"nft {cmd}"
-    result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error(f"nft command failed: {full_cmd}\n{result.stderr}")
-    else:
-        logging.debug(f"Ran: {full_cmd}")
-
-
-
-def run_iptables(cmd: str):
-    full_cmd = f"iptables {cmd}"
-    result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error(f"iptables command failed: {full_cmd}\n{result.stderr}")
-    else:
-        logging.debug(f"Ran: {full_cmd}")
-
-def cleanup():
-    logging.info("Flushing and deleting CYBORG chain")
-    run_nft("flush chain ip nat CYBORG || true")
-    run_nft("delete chain ip nat CYBORG || true")
-    run_nft("delete rule ip nat PREROUTING handle $(nft list chain ip nat PREROUTING | grep 'jump CYBORG' | awk '{print $1}') || true")
-
-def init_table():
-    logging.info("Initializing nftables NAT table and CYBORG chain...")
-    # Create CYBORG chain if it doesn’t exist
-    run_nft("add chain ip nat CYBORG { type nat hook prerouting priority 0 \; } || true")
-
-    # Insert jump from PREROUTING to CYBORG if not already present
-    check_cmd = "nft list chain ip nat PREROUTING | grep 'jump CYBORG'"
-    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-
-    if result.returncode != 0 or not result.stdout.strip():
-        run_nft("add rule ip nat PREROUTING jump CYBORG")
-        logging.info("Added jump from PREROUTING to CYBORG chain.")
-    else:
-        logging.debug("Jump from PREROUTING to CYBORG already exists.")
-
-def ensure_masquerade():
-    check_cmd = "nft list chain ip nat POSTROUTING | grep masquerade"
-    result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-    if not result.stdout.strip():
-        run_nft("add rule ip nat POSTROUTING masquerade")
-        logging.info("Added MASQUERADE rule to POSTROUTING.")
-    else:
-        logging.debug("MASQUERADE rule already exists.")
-
-def add_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
-    logging.info(f"Adding nftables rule: {from_port} -> {to_ip}:{to_port}")
-    run_nft(f"add rule ip nat {chain_name} tcp dport {from_port} dnat to {to_ip}:{to_port}")
-    ensure_masquerade()
-
-def remove_forward(chain_name: str, from_port: str, to_port: str, to_ip: str):
-    logging.info(f"Removing nftables rule for {from_port} -> {to_ip}:{to_port}")
-
-    # List rules in the chain and find matching rule handles to delete
-    list_cmd = f"nft list chain ip nat {chain_name}"
-    result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error(f"Failed to list nftables rules for chain {chain_name}")
-        return
-
-    # Rules have handles you can delete by handle
-    lines = result.stdout.splitlines()
-    for line in lines:
-        # Example rule line:
-        #    tcp dport 30000-30100 dnat to 10.42.0.138:60000 # handle 42
-        if f"tcp dport {from_port}" in line and f"dnat to {to_ip}:{to_port}" in line:
-            # Extract handle number
-            import re
-            handle_match = re.search(r"handle (\d+)", line)
-            if handle_match:
-                handle = handle_match.group(1)
-                run_nft(f"delete rule ip nat {chain_name} handle {handle}")
-                logging.info(f"Removed rule with handle {handle}")
-                return
-
-    logging.warning("No matching nftables DNAT rule found to delete.")
-
-
 
 node_name = os.getenv("NODE_NAME")
 KUBECONFIG = os.getenv("KUBECONFIG")
 CONTAINER_PORT = os.getenv("CONTAINER_PORT")
+
 # Extract all port ranges
 port_ranges = []
 i = 0
@@ -128,7 +53,21 @@ while True:
     i += 1
 logging.info("Port Ranges: %s", port_ranges)
 
+# Extract all ip 
+ip_list = []
+i = 0
+while True:
+    ip = os.getenv(f"IP_RANGE_{i}")
+    if ip is None:
+        break
+    ip_list.append((ip))
+    i += 1
+logging.info("ip list: %s", ip_list)
+
+
+
 if KUBECONFIG == None and node_name == None:
+    #MANUAL MODE
     node_name ="poli-master-00" 
 
     with open("../development/kubeconfig.yaml", "r") as f:
@@ -143,18 +82,35 @@ if KUBECONFIG == None and node_name == None:
     config.load_kube_config(config_file=tmp_kubeconfig_path)
 
 else:
+    #DEVELOPMENT/PRODUCTION MODE
     config.load_incluster_config()
     logging.info(f"I am running on node: {node_name} with kubeconfig 'incluster_config'")
 
 logging.info(f"Node name: {node_name}")
 logging.info(f"Kubeconfig: {KUBECONFIG}")
+logging.info(f"Container port: {CONTAINER_PORT}")
+logging.info("L4 Server App Name: %s", os.getenv("L4_SERVER_APP_NAME"))
 
+
+# Initialize the NAT table and CYBORG chain
 cleanup()
 init_table() 
 
 
+IP_pod_dict = {} # useful to store pod IPs when they are created and for removing them when they are deleted  !When a pod is deleted, we cannot access its IP anymore!
+
+#Listen to cluster events
+
 v1 = client.CoreV1Api()
 w = watch.Watch()
+pod_stream = w.stream(v1.list_pod_for_all_namespaces, timeout_seconds=0)
+#svc_stream = w.stream(v1.list_service_for_all_namespaces, timeout_seconds=0)
+#config_stream = w.stream(v1.list_config_map_for_all_namespaces, timeout_seconds=0)
+streams = [("pod", pod_stream)]  
+stream_cycle = cycle(streams)
+
+
+
 
 def handle_pod_event(event):
         pod = event['object']
@@ -162,8 +118,7 @@ def handle_pod_event(event):
         node_name = pod.spec.node_name
         pod_name = pod.metadata.name
         
-        
-        if pod.metadata.name == "l4-server" and event_type == "ADDED":
+        if  pod.metadata.labels.get("app") == os.getenv("L4_SERVER_APP_NAME") and pod.metadata.labels.get("l4responderserver.io/node") == os.getenv("NODE_NAME") and event_type == "ADDED":
             logging.debug(f"[{event_type}] Pod '{pod_name}' scheduled on node {node_name} in namespace '{pod.metadata.namespace}'")
 
             while pod.status.pod_ip == None:
@@ -174,32 +129,21 @@ def handle_pod_event(event):
             IP_pod_dict[pod.metadata.name] = pod.status.pod_ip
             logging.info(F"---[{pod.metadata.name}] Modifying iptables rules to redirect traffic to  pod IP {pod.status.pod_ip}...")
 
-            for start, end in port_ranges:
-                from_port = f"{start}-{end}"
-                add_forward("CYBORG", from_port, CONTAINER_PORT, pod.status.pod_ip)
+            for ip in ip_list:
+                for start, end in port_ranges:
+                    from_ports = f"{start}-{end}"
+                    add_forward("CYBORG",ip, from_ports, CONTAINER_PORT, pod.status.pod_ip)
 
-        if pod.metadata.name == "l4-server" and event_type == "DELETED":
+        if pod.metadata.labels.get("app") == os.getenv("L4_SERVER_APP_NAME") and pod.metadata.labels.get("l4responderserver.io/node") == os.getenv("NODE_NAME") and event_type == "DELETED":
             logging.info(f"---[{pod.metadata.name}]Modifying iptables rules to STOP traffic to pod IP {IP_pod_dict[pod.metadata.name]}...")
-            for start, end in port_ranges:
-                from_port = f"{start}-{end}"
-                remove_forward("CYBORG", from_port, CONTAINER_PORT, IP_pod_dict[pod.metadata.name])
+            for ip in ip_list:
+                for start, end in port_ranges:
+                    from_port = f"{start}-{end}"
+                    remove_forward("CYBORG",ip, from_port, CONTAINER_PORT, IP_pod_dict[pod.metadata.name])
             IP_pod_dict.pop(pod.metadata.name, None)
 
 
-
-
-IP_pod_dict = {}
-
-
-pod_stream = w.stream(v1.list_pod_for_all_namespaces, timeout_seconds=0)
-svc_stream = w.stream(v1.list_service_for_all_namespaces, timeout_seconds=0)
-config_stream = w.stream(v1.list_config_map_for_all_namespaces, timeout_seconds=0)
-
-
-streams = [("pod", pod_stream)]  #In the future you can add more streams like ("svc", svc_stream) or ("config", config_stream)
-stream_cycle = cycle(streams)
-
-while True:
+while True: # Continuously listen for events
     stream_type, stream = next(stream_cycle)
     try:
         event = next(stream)
@@ -209,11 +153,7 @@ while True:
         
         logging.error(f"Error reading from {stream_type} stream: {e}")
         continue
-
-    
-
     if stream_type == "pod":
-        
         handle_pod_event(event)
     '''
     elif stream_type == "config":
@@ -234,3 +174,5 @@ while True:
     '''
     sleep(1)  # Sleep to avoid overwhelming the output
 
+# for each event involving a pod, we will handle it with this function
+# we are interested in pod events like ADDED and DELETED on l4-server pod
