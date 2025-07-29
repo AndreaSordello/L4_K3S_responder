@@ -5,7 +5,7 @@ from itertools import cycle
 import logging
 import tempfile
 import subprocess
-
+import re
 def run_nft(cmd: str):
     full_cmd = f"nft {cmd}"
     result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
@@ -54,31 +54,37 @@ def ensure_masquerade():
     else:
         logging.debug("MASQUERADE rule already exists.")
 
-def add_forward(chain_name: str,ip: str, from_port: str, to_port: str, to_ip: str):
-    logging.info(f"Adding nftables rule: {ip}:{from_port} -> {to_ip}:{to_port}")
-    run_nft(f"add rule ip nat {chain_name} ip daddr {ip} tcp  dport {from_port} dnat to {to_ip}:{to_port}")
+def add_forward(chain_name: str,ip: str, from_port: str, to_port: str, to_ip: str, pod_name: str ):
+    logging.info(f"[{pod_name}] Adding nftables rule: {ip}:{from_port} -> {to_ip}:{to_port}")
+    run_nft(f"add rule ip nat {chain_name} ip daddr {ip} tcp  dport {from_port} dnat to {to_ip}:{to_port} comment {pod_name}")
     ensure_masquerade()
 
-def remove_forward(chain_name: str, ip: str, from_port: str, to_port: str, to_ip: str):
-    logging.info(f"Removing nftables rule for {ip}:{from_port} -> {to_ip}:{to_port}")
 
-    list_cmd = f"nft list chain ip nat {chain_name}"
+
+def remove_forward(chain_name: str, pod_name: str):
+    logging.info(f"Removing nftables rule(s) for POD [{pod_name}]")
+
+    list_cmd = f"nft -a list chain ip nat {chain_name}"  # -a shows handle
     result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
     if result.returncode != 0:
         logging.error(f"Failed to list nftables rules for chain {chain_name}")
         return
 
     lines = result.stdout.splitlines()
+    found = False
     for line in lines:
-        # Match rule line including source IP CIDR (ip saddr <ip>)
-        if (f"tcp dport {from_port}" in line and 
-            f"ip daddr {ip}" in line and
-            f"dnat to {to_ip}:{to_port}" in line):
+        # Check if the line contains the pod_name in the comment
+        # nft rule comments look like: comment "pod_name"
+        if f'{pod_name}' in line:
+            #logging.debug(f"DEBUG line: {line}")
             handle_match = re.search(r"handle (\d+)", line)
             if handle_match:
                 handle = handle_match.group(1)
+                #logging.debug(f"DEBUG handle: {handle}")
                 run_nft(f"delete rule ip nat {chain_name} handle {handle}")
-                logging.info(f"Removed rule with handle {handle}")
-                return
+                logging.info(f"Removed rule with handle {handle} for pod {pod_name}")
+                found = True
+                # If you want to delete all matching rules, do not return here
 
-    logging.warning("No matching nftables DNAT rule found to delete.")
+    if not found:
+        logging.warning(f"No matching nftables DNAT rule found for pod [{pod_name}].")

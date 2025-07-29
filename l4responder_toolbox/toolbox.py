@@ -6,7 +6,7 @@ import logging
 import tempfile
 import subprocess
 
-from utily import run_nft, run_iptables, cleanup, init_table, ensure_masquerade, add_forward
+from utily import run_nft, run_iptables, cleanup, init_table, ensure_masquerade, add_forward, remove_forward
 
 
 
@@ -96,9 +96,6 @@ logging.info("L4 Server App Name: %s", os.getenv("L4_SERVER_APP_NAME"))
 cleanup()
 init_table() 
 
-
-IP_pod_dict = {} # useful to store pod IPs when they are created and for removing them when they are deleted  !When a pod is deleted, we cannot access its IP anymore!
-
 #Listen to cluster events
 
 v1 = client.CoreV1Api()
@@ -125,22 +122,16 @@ def handle_pod_event(event):
                 pod = v1.read_namespaced_pod(name=pod.metadata.name,namespace=pod.metadata.namespace)
                 logging.debug(f"---[{pod.metadata.name}] Waiting for pod to get an IP address...")
                 sleep(2)
-
-            IP_pod_dict[pod.metadata.name] = pod.status.pod_ip
             logging.info(F"---[{pod.metadata.name}] Modifying iptables rules to redirect traffic to  pod IP {pod.status.pod_ip}...")
 
             for ip in ip_list:
                 for start, end in port_ranges:
                     from_ports = f"{start}-{end}"
-                    add_forward("CYBORG",ip, from_ports, CONTAINER_PORT, pod.status.pod_ip)
+                    add_forward("CYBORG",ip, from_ports, CONTAINER_PORT, pod.status.pod_ip,pod.metadata.name)
 
         if pod.metadata.labels.get("app") == os.getenv("L4_SERVER_APP_NAME") and pod.metadata.labels.get("l4responderserver.io/node") == os.getenv("NODE_NAME") and event_type == "DELETED":
-            logging.info(f"---[{pod.metadata.name}]Modifying iptables rules to STOP traffic to pod IP {IP_pod_dict[pod.metadata.name]}...")
-            for ip in ip_list:
-                for start, end in port_ranges:
-                    from_port = f"{start}-{end}"
-                    remove_forward("CYBORG",ip, from_port, CONTAINER_PORT, IP_pod_dict[pod.metadata.name])
-            IP_pod_dict.pop(pod.metadata.name, None)
+            logging.info(f"---[{pod.metadata.name}]Modifying iptables rules to STOP traffic...")
+            remove_forward("CYBORG",pod.metadata.name)
 
 
 while True: # Continuously listen for events
