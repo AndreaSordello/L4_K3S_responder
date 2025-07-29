@@ -16,13 +16,7 @@ def run_nft(cmd: str):
 
 
 
-def run_iptables(cmd: str):
-    full_cmd = f"iptables {cmd}"
-    result = subprocess.run(full_cmd, shell=True, capture_output=True, text=True)
-    if result.returncode != 0:
-        logging.error(f"iptables command failed: {full_cmd}\n{result.stderr}")
-    else:
-        logging.debug(f"Ran: {full_cmd}")
+
 
 def cleanup():
     logging.info("Flushing and deleting CYBORG chain")
