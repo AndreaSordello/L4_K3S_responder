@@ -8,7 +8,6 @@ LISTEN_IP = "0.0.0.0"
 LISTEN_PORT = 60000
 CONNECTION_TIMEOUT = 5.0  # seconds
 
-
 async def handle_client(reader, writer):
     addr = writer.get_extra_info('peername')
     logging.info(f" Connessione da {addr[0]}:{addr[1]}")
@@ -16,16 +15,22 @@ async def handle_client(reader, writer):
     try:
         data = await asyncio.wait_for(reader.read(1024), timeout=CONNECTION_TIMEOUT)
         if data:
-            message = data.decode().strip()
-            logging.debug(f"Messaggio ricevuto: {message}")
+            logging.debug(f"Messaggio ricevuto")
         else:
             logging.warning(f" Nessun dato ricevuto da {addr[0]}:{addr[1]}")
     except asyncio.TimeoutError:
-        logging.warning(f" Timeout: Nessun messaggio da {addr[0]}:{addr[1]} entro 3 secondi")
+        logging.warning(f" Timeout: Nessun messaggio da {addr[0]}:{addr[1]} entro {CONNECTION_TIMEOUT} secondi")
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        logging.warning(f" Connessione chiusa dal client {addr[0]}:{addr[1]}")
+    except Exception as e:
+        logging.error(f" Errore durante la lettura da {addr[0]}:{addr[1]}: {e}")
 
     logging.info(f" Chiusura connessione con {addr[0]}:{addr[1]}")
-    writer.close()
-    await writer.wait_closed()
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except Exception:
+        pass
 
 
 
