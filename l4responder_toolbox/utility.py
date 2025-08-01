@@ -20,14 +20,16 @@ def run_nft(cmd: str):
 
 def cleanup():
     logging.info("Flushing and deleting CYBORG chain")
-    run_nft("flush chain ip nat CYBORG || true")
-    run_nft("delete chain ip nat CYBORG || true")
-    run_nft("delete rule ip nat PREROUTING handle $(nft list chain ip nat PREROUTING | grep 'jump CYBORG' | awk '{print $1}') || true")
+    run_nft("flush chain ip nat CYBORG")
+    run_nft("delete chain ip nat CYBORG")
+    run_nft("delete rule ip nat PREROUTING handle $(nft list chain ip nat PREROUTING | grep 'jump CYBORG' | awk '{print $1}')")
 
 def init_table():
     logging.info("Initializing nftables NAT table and CYBORG chain...")
     # Create CYBORG chain if it doesn’t exist
-    run_nft("add chain ip nat CYBORG { type nat hook prerouting priority 0 \; } || true")
+    run_nft("add chain ip nat CYBORG")
+    run_nft("add rule ip nat PREROUTING jump CYBORG")  # Create table if it doesn't exist
+    #run_nft("add chain ip nat CYBORG { type nat hook prerouting priority 0 \; } || true")
 
     # Insert jump from PREROUTING to CYBORG if not already present
     check_cmd = "nft list chain ip nat PREROUTING | grep 'jump CYBORG'"

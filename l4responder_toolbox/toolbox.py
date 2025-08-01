@@ -6,7 +6,7 @@ import logging
 import tempfile
 import subprocess
 
-from utily import run_nft, run_iptables, cleanup, init_table, ensure_masquerade, add_forward, remove_forward
+from utility import run_nft, cleanup, init_table, ensure_masquerade, add_forward, remove_forward
 
 
 
