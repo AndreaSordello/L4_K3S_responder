@@ -15,23 +15,52 @@ def run_nft(cmd: str):
         logging.debug(f"Ran: {full_cmd}")
 
 
-
-
-
 def cleanup():
-    logging.info("Flushing and deleting CYBORG chain")
-    run_nft("flush chain ip nat CYBORG")
-    run_nft("delete chain ip nat CYBORG")
-    run_nft("delete rule ip nat PREROUTING handle $(nft list chain ip nat PREROUTING | grep 'jump CYBORG' | awk '{print $1}')")
+    logging.info("Cleaning up CYBORG chain (if exists)")
+    
+    # Check if chain exists first
+    check_result = subprocess.run("nft list chain ip nat CYBORG", shell=True, capture_output=True, text=True)
+    
+    if check_result.returncode == 0:
+        logging.debug("CYBORG chain exists, cleaning up...")
+        
+        # Remove ALL jump rules to CYBORG from PREROUTING
+        list_cmd = "nft -a list chain ip nat PREROUTING"
+        result = subprocess.run(list_cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            lines = result.stdout.splitlines()
+            handles_to_remove = []
+            
+            # Collect all handles that jump to CYBORG
+            for line in lines:
+                if 'jump CYBORG' in line:
+                    handle_match = re.search(r"handle (\d+)", line)
+                    if handle_match:
+                        handles_to_remove.append(handle_match.group(1))
+            
+            # Remove all the jump rules
+            for handle in handles_to_remove:
+                run_nft(f"delete rule ip nat PREROUTING handle {handle}")
+                logging.debug(f"Removed PREROUTING jump rule with handle {handle}")
+        
+        # Flush the chain (don't delete it, as we discussed)
+        run_nft("flush chain ip nat CYBORG")
+        logging.info(f"CYBORG chain cleanup completed - removed {len(handles_to_remove)} jump rules")
+    else:
+        logging.debug("CYBORG chain doesn't exist, skipping cleanup")
 
 def init_table():
     logging.info("Initializing nftables NAT table and CYBORG chain...")
-    # Create CYBORG chain if it doesn’t exist
-    run_nft("add chain ip nat CYBORG")
-    run_nft("add rule ip nat PREROUTING jump CYBORG")  # Create table if it doesn't exist
-    #run_nft("add chain ip nat CYBORG { type nat hook prerouting priority 0 \; } || true")
-
-    # Insert jump from PREROUTING to CYBORG if not already present
+    
+    # Create CYBORG chain if it doesn't exist
+    chain_check = subprocess.run("nft list chain ip nat CYBORG", shell=True, capture_output=True, text=True)
+    if chain_check.returncode != 0:
+        run_nft("add chain ip nat CYBORG")
+        logging.debug("Created CYBORG chain")
+    else:
+        logging.debug("CYBORG chain already exists")
+    
+    # Check if jump rule already exists
     check_cmd = "nft list chain ip nat PREROUTING | grep 'jump CYBORG'"
     result = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
 
