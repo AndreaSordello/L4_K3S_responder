@@ -1,10 +1,12 @@
 import asyncio
 import logging
+import os
+
 logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 
 # Configuration
 LISTEN_IP = "0.0.0.0"
-LISTEN_PORT = 60000
+LISTEN_PORT = int(os.getenv("CONTAINER_PORT", "30000"))
 CONNECTION_TIMEOUT = 5.0  # seconds
 
 async def handle_client(reader, writer):

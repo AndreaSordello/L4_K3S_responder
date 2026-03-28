@@ -1,10 +1,8 @@
-from kubernetes import client, config,watch
+from kubernetes import client, config, watch
 from time import sleep
 import os
 from itertools import cycle
 import logging
-import tempfile
-import subprocess
 
 from utility import run_nft, cleanup, init_table, ensure_masquerade, add_forward, remove_forward
 
@@ -66,25 +64,12 @@ logging.info("ip list: %s", ip_list)
 
 
 
-if KUBECONFIG == None and node_name == None:
-    #MANUAL MODE
-    node_name ="poli-master-00" 
+if node_name is None:
+    logging.critical("NODE_NAME environment variable is required. Exiting.")
+    raise SystemExit(1)
 
-    with open("../development/kubeconfig.yaml", "r") as f:
-        KUBECONFIG = f.read()
-    logging.info(f"I am running LOCALLY on node: {node_name} with kubeconfig: {KUBECONFIG}")
-    with tempfile.NamedTemporaryFile(mode="w+", delete=False) as tmpfile:
-        tmpfile.write(KUBECONFIG)
-        tmpfile.flush()
-        tmp_kubeconfig_path = tmpfile.name
-
-        # Now load config from the temp file
-    config.load_kube_config(config_file=tmp_kubeconfig_path)
-
-else:
-    #DEVELOPMENT/PRODUCTION MODE
-    config.load_incluster_config()
-    logging.info(f"I am running on node: {node_name} with kubeconfig 'incluster_config'")
+config.load_incluster_config()
+logging.info(f"I am running on node: {node_name} with in-cluster config")
 
 logging.info(f"Node name: {node_name}")
 logging.info(f"Kubeconfig: {KUBECONFIG}")
